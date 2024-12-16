@@ -3,7 +3,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.ai.translation.document import DocumentTranslationClient
 
 # create variables for your resource key, custom endpoint, sourceUrl, targetUrl, and targetLanguage
-key = 'BbxZ6IQ3tFMaYQElZMBq8p5nlHkBSufc71yOO4buGEz4hiz3z75iJQQJ99ALACrIdLPXJ3w3AAAbACOGXUMb'
+key = '' # replace with your own translator key
 endpoint = 'https://uganda.cognitiveservices.azure.com/'
 sourceUri = 'https://translator.blob.core.windows.net/translator'
 targetUri = 'https://translator.blob.core.windows.net/translator1'
