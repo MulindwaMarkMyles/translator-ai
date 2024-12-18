@@ -2,3 +2,4 @@ nltk
 python-docx
 boto3
 streamlit
+pywin32
