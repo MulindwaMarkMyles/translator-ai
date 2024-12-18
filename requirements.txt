@@ -1,6 +1,4 @@
-fpdf
+nltk
 python-docx
-pypdf2
 boto3
 streamlit
-pymupdf
