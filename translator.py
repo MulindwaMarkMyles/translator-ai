@@ -1,152 +1,216 @@
+import os
 import boto3
 import streamlit as st
-import PyPDF2
-from io import BytesIO
 from docx import Document
-from fpdf import FPDF
-import os
+from nltk.tokenize import sent_tokenize
+import nltk
+import tempfile
 
-# Initialize Amazon Translate client
-def init_aws_translate():
-    return boto3.client(
-        service_name='translate',
-        region_name='us-east-1',  # Adjust to your region
-        aws_access_key_id=os.environ.get('aws_key_id'),  # Replace with your own
-        aws_secret_access_key=os.environ.get('aws_secret_key')  # Replace with your own
-    )
+# Add new imports
+try:
+    import win32com.client
+    import pythoncom
+    WORD_AVAILABLE = True
+except ImportError:
+    WORD_AVAILABLE = False
 
-# Function to extract text from PDF
-def extract_text_from_pdf(pdf_file):
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
-    text = ''
-    for page_num in range(len(pdf_reader.pages)):
-        page = pdf_reader.pages[page_num]
-        text += page.extract_text()
-    return text
+# Ensure nltk data is available
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('punkt_tab')
 
-# Function to extract text from Word document
-def extract_text_from_word(word_file):
-    doc = Document(word_file)
-    text = ''
-    for para in doc.paragraphs:
-        text += para.text + '\n'
-    return text
+class DocumentTranslator:
+    def __init__(self, aws_key_id, aws_secret_key):
+        self.translate_client = boto3.client(
+            service_name='translate',
+            region_name='us-east-1',
+            aws_access_key_id=aws_key_id,
+            aws_secret_access_key=aws_secret_key
+        )
 
-# Function to translate text
-def translate_text(client, text, source_language, target_language):
-    response = client.translate_text(
-        Text=text,
-        SourceLanguageCode=source_language,
-        TargetLanguageCode=target_language
-    )
-    return response['TranslatedText']
+    def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
+        if not text.strip():
+            return text
+            
+        try:
+            max_chunk_size = 5000
+            sentences = sent_tokenize(text)
+            chunks = []
+            current_chunk = []
+            current_size = 0
 
-# Save translated content to Word
-def save_as_word(translated_text, original_filename):
-    doc = Document()
-    doc.add_paragraph(translated_text)
-    translated_filename = f"translated_{original_filename}.docx"
-    doc.save(translated_filename)
-    return translated_filename
+            for sentence in sentences:
+                if current_size + len(sentence) > max_chunk_size:
+                    chunks.append(' '.join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+                current_chunk.append(sentence)
+                current_size += len(sentence)
 
-# Save translated content to PDF
-def save_as_pdf(translated_text, original_filename):
-    # Initialize PDF
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    
-    # Add a custom font that supports Unicode
-    pdf.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
-    pdf.set_font('DejaVu', '', 12)
-    
-    # Add the translated text to the PDF
-    pdf.multi_cell(0, 10, translated_text)
-    
-    # Save the document as a PDF file
-    translated_filename = f"translated_{original_filename}.pdf"
-    pdf.output(translated_filename)
-    
-    return translated_filename
+            if current_chunk:
+                chunks.append(' '.join(current_chunk))
 
+            translated_chunks = []
+            for chunk in chunks:
+                response = self.translate_client.translate_text(
+                    Text=chunk,
+                    SourceLanguageCode=source_lang,
+                    TargetLanguageCode=target_lang
+                )
+                translated_chunks.append(response['TranslatedText'])
 
-# Save translated content as text file
-def save_as_text(translated_text, original_filename):
-    translated_filename = f"translated_{original_filename}.txt"
-    with open(translated_filename, "w", encoding="utf-8") as f:
-        f.write(translated_text)
-    return translated_filename
+            return ' '.join(translated_chunks)
+        except Exception as e:
+            st.error(f"Translation error: {str(e)}")
+            return text
 
-# Streamlit app
-def main():
-    st.title("Document Translator with Amazon Translate")
-    st.write("Upload a document (PDF, Word, or TXT), choose a target language, and translate!")
+    def translate_docx(self, input_docx_path: str, source_lang: str, target_lang: str, output_docx_path: str, progress_callback):
+        doc = Document(input_docx_path)
 
-    # Translation settings
-    target_language = st.selectbox(
-        "Select Target Language", 
-        ["fr", "ar", "es", "de", "it", "zh", "ja"], 
-        index=0
-    )
+        total_paragraphs = len(doc.paragraphs) + sum(len(table.rows) for table in doc.tables)
+        progress_callback(0)  # Initialize progress bar
 
-    source_language = st.text_input(
-        "Enter Source Language Code (e.g., 'en' for English)", 
-        value="en"
-    )
+        # Process paragraphs
+        for i, paragraph in enumerate(doc.paragraphs):
+            if paragraph.text.strip():
+                translated_text = self.translate_text(paragraph.text, source_lang, target_lang)
+                for run in paragraph.runs:
+                    run.text = translated_text
+            progress_callback(int((i + 1) / total_paragraphs * 100))  # Update progress bar
 
-    # File upload
-    uploaded_file = st.file_uploader("Upload a document (PDF, Word, or TXT)", type=["pdf", "docx", "txt"])
-    if uploaded_file is not None:
-        st.success(f"Uploaded: {uploaded_file.name}")
-        
-        # Extract text based on file type
-        if uploaded_file.type == "application/pdf":
-            document_content = extract_text_from_pdf(uploaded_file)
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            document_content = extract_text_from_word(uploaded_file)
-        else:
-            document_content = uploaded_file.read().decode("utf-8")
-        
-        # Display document preview
-        st.subheader("Document Preview:")
-        st.text_area("Preview", document_content[:500], height=200)
+        # Process tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        cell.text = self.translate_text(cell.text, source_lang, target_lang)
+            progress_callback(100)  # 100% after processing tables
 
-    # Translate button
-    if st.button("Start Translation"):
-        if uploaded_file is not None:
-            with st.spinner("Translating document..."):
+        doc.save(output_docx_path)
+
+    def pdf_to_docx(self, pdf_path, docx_path, progress_callback):
+        """Convert PDF to DOCX using Microsoft Word"""
+        try:
+            if WORD_AVAILABLE:
+                # Initialize COM in the current thread
+                pythoncom.CoInitialize()
+                
+                # Create Word application instance
+                word = win32com.client.Dispatch("Word.Application")
+                word.Visible = False
+
                 try:
-                    # Initialize Amazon Translate client
-                    client = init_aws_translate()
+                    status_text = st.empty()
+                    status_text.text("Opening PDF with Microsoft Word...")
                     
-                    # Translate the content
-                    translated_text = translate_text(client, document_content, source_language, target_language)
+                    # Convert PDF to DOCX
+                    doc = word.Documents.Open(pdf_path)
+                    progress_callback(50)
                     
-                    # Display results
-                    st.success("Translation completed!")
-                    st.subheader("Translated Document:")
-                    st.text_area("Translation Result", translated_text, height=300)
+                    status_text.text("Saving as DOCX...")
+                    doc.SaveAs2(docx_path, FileFormat=16)  # 16 = DOCX format
+                    progress_callback(90)
                     
-                    # Save and allow downloading in original file format
-                    if uploaded_file.type == "application/pdf":
-                        translated_filename = save_as_pdf(translated_text, uploaded_file.name)
-                    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                        translated_filename = save_as_word(translated_text, uploaded_file.name)
-                    else:
-                        translated_filename = save_as_text(translated_text, uploaded_file.name)
+                    doc.Close()
+                    progress_callback(100)
+                    status_text.empty()
                     
-                    # Provide download button
-                    with open(translated_filename, "rb") as f:
-                        st.download_button(
-                            label="Download Translated Document",
-                            data=f,
-                            file_name=translated_filename,
-                            mime="application/octet-stream"
-                        )
                 except Exception as e:
-                    st.error(f"An error occurred: {e}")
-        else:
-            st.warning("Please upload a file to translate.")
+                    st.error(f"MS Word conversion error: {str(e)}")
+                    raise
+                finally:
+                    word.Quit()
+                    pythoncom.CoUninitialize()
+            else:
+                # Fallback to libreoffice
+                import subprocess
+                subprocess.run(['soffice', '--headless', '--convert-to', 'docx', pdf_path, '--outdir', os.path.dirname(docx_path)], check=True)
+                progress_callback(100)
 
-if __name__ == "__main__":
-    main()
+        except Exception as e:
+            st.error(f"PDF conversion error: {str(e)}")
+            raise
+
+# Streamlit Application
+st.set_page_config(page_title="DocuX Translator", layout="wide")
+st.title("DocuX")
+
+# Define more detailed language options
+LANGUAGES = {
+    "English": "en",
+    "French": "fr",
+    "Spanish": "es",
+    "German": "de",
+    "Italian": "it",
+    "Arabic": "ar",
+    "Chinese (Simplified)": "zh",
+    "Japanese": "ja"
+}
+
+aws_key_id = os.environ.get('aws_key_id')
+aws_secret_key = os.environ.get('aws_secret_key')
+
+if not aws_key_id or not aws_secret_key:
+    st.error("AWS credentials not found. Please set environment variables.")
+else:
+    translator = DocumentTranslator(aws_key_id, aws_secret_key)
+
+    source_language = st.selectbox("Source Language", list(LANGUAGES.keys()), index=0)
+    target_language = st.selectbox("Target Language", list(LANGUAGES.keys()), index=1)
+
+    uploaded_file = st.file_uploader("Upload PDF or DOCX", type=["pdf", "docx"])
+
+    if uploaded_file:
+        # Create temporary directory for processing
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                input_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(input_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                if st.button("Translate"):
+                    try:
+                        status_text.text("Processing document...")
+                        output_filename = f"translated_{uploaded_file.name}_{target_language}"
+                        if not output_filename.endswith('.docx'):
+                            output_filename = output_filename + '.docx'
+                        output_path = os.path.join(temp_dir, output_filename)
+
+                        source_lang_code = LANGUAGES[source_language]
+                        target_lang_code = LANGUAGES[target_language]
+
+                        if uploaded_file.type == "application/pdf":
+                            temp_docx = os.path.join(temp_dir, "temp_converted.docx")
+                            status_text.text("Converting PDF to DOCX...")
+                            translator.pdf_to_docx(input_path, temp_docx, progress_bar.progress)
+                            
+                            status_text.text("Translating document...")
+                            translator.translate_docx(temp_docx, source_lang_code, target_lang_code, output_path, progress_bar.progress)
+                        else:
+                            status_text.text("Translating document...")
+                            translator.translate_docx(input_path, source_lang_code, target_lang_code, output_path, progress_bar.progress)
+
+                        with open(output_path, "rb") as f:
+                            st.download_button(
+                                label="Download Translated Document",
+                                data=f.read(),
+                                file_name=output_filename,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            )
+
+                        status_text.text("Translation complete!")
+                        progress_bar.progress(100)
+
+                    except Exception as e:
+                        st.error(f"Error during translation: {str(e)}")
+                        progress_bar.empty()
+                        status_text.empty()
+
+            except Exception as e:
+                st.error(f"Error processing file: {str(e)}")
